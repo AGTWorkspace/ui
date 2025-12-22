@@ -1,106 +1,194 @@
+"""
+Runner script for the CMI Orchestrator Agent with session memory.
+"""
 import asyncio
 from google.adk.sessions import InMemorySessionService
 from google.adk.runners import Runner
 from google.genai import types
-from google.adk.agents import LlmAgent
-from google.adk.tools.agent_tool import AgentTool
-from prompt import prompt
-from sub_agents.Qualification_agent import Qualification_agent
-from sub_agents.Pricing_agent import Pricing_agent
-from sub_agents.Design_agent import Design_agent
-from sub_agents.Communication_Agent import Communication_agent
-from arize.otel import register
-tracer_provider = register(
-    space_id="U3BhY2U6MjI5NTA6T1A4dA==",      # Found in app space settings page
-    api_key="ak-8ab8d973-95f2-48ae-b254-35f53faa766c-gnT5FvGep45UXNNSrkwGP2vvnpIN86Y3",        # Found in app space settings page
-    project_name="CMI"  # Name this whatever you prefer
+from .agent import root_agent
+
+# Constants
+APP_NAME = "CMI_Business_Solution"
+USER_ID = "default_user"
+SESSION_ID = "default_session"
+
+# Initialize the session service (in-memory for development)
+session_service = InMemorySessionService()
+
+# Create the runner
+runner = Runner(
+    agent=root_agent,
+    app_name=APP_NAME,
+    session_service=session_service
 )
-from openinference.instrumentation.google_adk import GoogleADKInstrumentor
 
 
+async def create_session():
+    """Create a new session for the user."""
+    session = await session_service.create_session(
+        app_name=APP_NAME,
+        user_id=USER_ID,
+        session_id=SESSION_ID
+    )
+    return session
 
-GoogleADKInstrumentor().instrument(tracer_provider=tracer_provider)
-model = "gemini-3-pro-preview"
 
-CMI_orchestrator_agent = LlmAgent(
-    name="CMI_Orchestrator_Agent",
-    model= model,
-    description="you are a telecom agent to retrive the information of the customer.",
-    instruction=prompt,
-    # tools=[
-    #     Qualification_agent,
-    # #     # AgentTool(agent=Pricing_agent),
-    # #     AgentTool(agent=Design_agent),
-    # #     # AgentTool(agent=Communication_agent)
-    # ],
-    # sub_agents=[Design_agent,Pricing_agent,Communication_agent]
-)
-root_agent = CMI_orchestrator_agent
+async def run_agent(user_message: str):
+    """
+    Run the orchestrator agent with a user message.
+    
+    Args:
+        user_message: The message from the user to process.
+        
+    Returns:
+        The agent's response.
+    """
+    # Create content from user message
+    content = types.Content(
+        role="user",
+        parts=[types.Part(text=user_message)]
+    )
+    
+    # Run the agent and collect responses
+    responses = []
+    async for event in runner.run_async(
+        user_id=USER_ID,
+        session_id=SESSION_ID,
+        new_message=content
+    ):
+        if event.is_final_response():
+            if event.content and event.content.parts:
+                for part in event.content.parts:
+                    if part.text:
+                        responses.append(part.text)
+    
+    return "\n".join(responses)
+
+
+async def interactive_chat():
+    """Run an interactive chat session with the agent."""
+    # Create initial session
+    await create_session()
+    
+    print("=" * 60)
+    print("CMI Business Solution - Orchestrator Agent")
+    print("=" * 60)
+    print("Type 'quit' or 'exit' to end the session.\n")
+    
+    while True:
+        try:
+            user_input = input("You: ").strip()
+            
+            if not user_input:
+                continue
+                
+            if user_input.lower() in ['quit', 'exit']:
+                print("Goodbye!")
+                break
+            
+            print("\nAgent: ", end="")
+            response = await run_agent(user_input)
+            print(response)
+            print()
+            
+        except KeyboardInterrupt:
+            print("\n\nSession interrupted. Goodbye!")
+            break
+        except Exception as e:
+            print(f"\nError: {e}")
+            print("Please try again.\n")
 
 
 if __name__ == "__main__":
-    # Constants
-    APP_NAME = "CMI_Business_Solution"
-    USER_ID = "default_user"
-    SESSION_ID = "default_session"
+    asyncio.run(interactive_chat())
 
-    # Initialize the session service (in-memory for development)
-    session_service = InMemorySessionService()
 
-    # Create the runner
-    runner = Runner(
-        agent=root_agent,
-        app_name=APP_NAME,
-        session_service=session_service
-    )
 
-    async def run_chat():
-        print("=" * 60)
-        print("CMI Business Solution - Orchestrator Agent")
-        print("=" * 60)
-        print("Type 'quit' or 'exit' to end the session.\n")
 
-        # Create session
-        await session_service.create_session(
-            app_name=APP_NAME,
-            user_id=USER_ID,
-            session_id=SESSION_ID
+###server.py
+
+from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+from google.adk.sessions import InMemorySessionService
+from google.adk.runners import Runner
+from google.genai import types
+from agent import root_agent
+import asyncio
+
+app = FastAPI()
+
+# Add CORS middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Constants
+APP_NAME = "CMI_Business_Solution"
+
+# Initialize services
+session_service = InMemorySessionService()
+
+# Create runner
+runner = Runner(
+    agent=root_agent,
+    app_name=APP_NAME,
+    session_service=session_service
+)
+
+class ChatRequest(BaseModel):
+    user_id: str
+    session_id: str
+    message: str
+
+class ChatResponse(BaseModel):
+    response: str
+
+@app.post("/chat", response_model=ChatResponse)
+async def chat_endpoint(request: ChatRequest):
+    try:
+        # Create session if it doesn't exist (or just ensure it's valid)
+        # Note: create_session is idempotent in InMemorySessionService or we can just try/except
+        # Ideally, we should check if session exists, but for now we can just ensure we can run with it.
+        # InMemorySessionService.create_session typically stores it in a dict.
+        try:
+            await session_service.create_session(
+                app_name=APP_NAME,
+                user_id=request.user_id,
+                session_id=request.session_id
+            )
+        except Exception:
+            # Session likely already exists, which is fine
+            pass
+
+        content = types.Content(
+            role="user",
+            parts=[types.Part(text=request.message)]
         )
-        
-        while True:
-            try:
-                user_input = input("You: ").strip()
-                if not user_input:
-                    continue
-                if user_input.lower() in ['quit', 'exit']:
-                    break
 
-                # Create content from user message
-                content = types.Content(
-                    role="user",
-                    parts=[types.Part(text=user_input)]
-                )
+        response_text = ""
+        async for event in runner.run_async(
+            user_id=request.user_id,
+            session_id=request.session_id,
+            new_message=content
+        ):
+            if event.is_final_response():
+                if event.content and event.content.parts:
+                    for part in event.content.parts:
+                        if part.text:
+                            response_text += part.text
 
-                print("\nAgent: ", end="")
-                async for event in runner.run_async(
-                    user_id=USER_ID,
-                    session_id=SESSION_ID,
-                    new_message=content
-                ):
-                    if event.is_final_response():
-                        if event.content and event.content.parts:
-                            for part in event.content.parts:
-                                if part.text:
-                                    print(part.text)
-                print()
+        return ChatResponse(response=response_text)
 
-            except KeyboardInterrupt:
-                break
-            except Exception as e:
-                print(f"\nError: {e}")
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
 
-    asyncio.run(run_chat())
-# if event.is_final_response():
-#             if event.content and event.content.parts:
-#                 final_response_text = event.content.parts[0].text
-#             break
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)
