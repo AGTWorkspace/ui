@@ -100,3 +100,7 @@ if __name__ == "__main__":
                 print(f"\nError: {e}")
 
     asyncio.run(run_chat())
+# if event.is_final_response():
+#             if event.content and event.content.parts:
+#                 final_response_text = event.content.parts[0].text
+#             break
