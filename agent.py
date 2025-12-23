@@ -192,3 +192,48 @@ async def chat_endpoint(request: ChatRequest):
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
+
+
+
+
+
+from google.adk.sessions import InMemorySessionService
+from google.adk.runners import Runner
+from google.genai import types
+import os, asyncio
+session_service = InMemorySessionService()
+
+APP_NAME = "sales_pitch"
+USER_ID = "user_1"
+SESSION_ID = "session_001"
+
+async def run_agent(query: str):
+    """Run orchestrator agent and return final text output."""
+    
+    await session_service.create_session(
+        app_name=APP_NAME, user_id=USER_ID, session_id=SESSION_ID
+    )
+
+    runner = Runner(
+        agent=project_orchestrator_agent,
+        app_name=APP_NAME,
+        session_service=session_service
+    )
+
+    content = types.Content(role="user", parts=[types.Part(text=query)])
+    final_response_text = "Agent did not produce a final response."
+
+    async for event in runner.run_async(user_id=USER_ID, session_id=SESSION_ID, new_message=content):
+        if event.is_final_response():
+            if event.content and event.content.parts:
+                final_response_text = event.content.parts[0].text
+            break
+            
+    print(f"<<< Agent Response: {final_response_text}")
+    # return(final_response_text)
+    # Safely remove the .selected_company file if it exists
+    if os.path.exists(".selected_company"):
+        os.remove(".selected_company")
+
+    return(final_response_text)
+    
